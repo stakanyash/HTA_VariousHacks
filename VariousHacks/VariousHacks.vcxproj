@@ -177,10 +177,10 @@
     <ClInclude Include="XmlNode.h" />
   </ItemGroup>
   <ItemGroup>
-    <Text Include="..\mod\readme.txt" />
+    <None Include="..\mod\scripts\VariousHacks.ini" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\mod\scripts\VariousHacks.ini" />
+    <Text Include="..\readme.txt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
