@@ -12,14 +12,14 @@ struct WareUnits
 	std::string Ware;
 };
 
-std::vector< WareUnits*> RepairWares;
-std::vector< WareUnits*> RefuelWares;
+std::vector<WareUnits> RepairWares;
+std::vector<WareUnits> RefuelWares;
 
 bool TryRepair(ai::Vehicle* playerVehicle, CStr& name)
 {
-	for (auto wu : RepairWares)
+	for (auto& wu : RepairWares)
 	{
-		if (name.Equal(wu->Ware.c_str()))
+		if (name.Equal(wu.Ware.c_str()))
 		{
 			float current = playerVehicle->GetHealth();
 			float max = playerVehicle->GetMaxHealth();
@@ -29,7 +29,7 @@ bool TryRepair(ai::Vehicle* playerVehicle, CStr& name)
 				return false;
 			}
 
-			float amount = wu->Units;
+			float amount = wu.Units;
 			if (current + amount > max)
 			{
 				amount = max - current;
@@ -46,9 +46,9 @@ bool TryRepair(ai::Vehicle* playerVehicle, CStr& name)
 
 bool TryRefuel(ai::Vehicle* playerVehicle, CStr& name)
 {
-	for (auto wu : RefuelWares)
+	for (auto& wu : RefuelWares)
 	{
-		if (name.Equal(wu->Ware.c_str()))
+		if (name.Equal(wu.Ware.c_str()))
 		{
 			float current = playerVehicle->GetFuel();
 			float max = playerVehicle->GetMaxFuel();
@@ -58,7 +58,7 @@ bool TryRefuel(ai::Vehicle* playerVehicle, CStr& name)
 				return false;
 			}
 
-			float amount = wu->Units;
+			float amount = wu.Units;
 			if (current + amount > max)
 			{
 				amount = max - current;

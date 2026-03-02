@@ -268,17 +268,17 @@
       <Filter>Features</Filter>
     </ClInclude>
     <ClInclude Include="Path.h">
-      <Filter>Features</Filter>
+      <Filter>SDK\ai</Filter>
     </ClInclude>
-  </ItemGroup>
-  <ItemGroup>
-    <Text Include="..\mod\readme.txt">
-      <Filter>Mod</Filter>
-    </Text>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\mod\scripts\VariousHacks.ini">
       <Filter>Mod</Filter>
     </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="..\readme.txt">
+      <Filter>Mod</Filter>
+    </Text>
   </ItemGroup>
 </Project>

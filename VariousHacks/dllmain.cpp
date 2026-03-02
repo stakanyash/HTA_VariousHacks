@@ -24,7 +24,7 @@
 void Init()
 {
 	// Enable console
-#ifdef  _DEBUG
+#ifdef _DEBUG
 	injector::MakeNOP(0x005A8AD5, 2);
 #endif
 
@@ -57,10 +57,10 @@ void Init()
 			sprintf(buff, "REPAIR_%d", i);
 			if (iniReader.HasSection(buff))
 			{
-				auto wu = new WareUnits();
+				WareUnits wu;
 
-				wu->Ware = iniReader.ReadString(buff, "Ware", "");
-				wu->Units = iniReader.ReadInteger(buff, "Units", 0);
+				wu.Ware = iniReader.ReadString(buff, "Ware", "");
+				wu.Units = iniReader.ReadInteger(buff, "Units", 0);
 
 				RepairWares.push_back(wu);
 				i++;
@@ -77,10 +77,10 @@ void Init()
 			sprintf(buff, "REFUEL_%d", i);
 			if (iniReader.HasSection(buff))
 			{
-				auto wu = new WareUnits();
+				WareUnits wu;
 
-				wu->Ware = iniReader.ReadString(buff, "Ware", "");
-				wu->Units = iniReader.ReadInteger(buff, "Units", 0);
+				wu.Ware = iniReader.ReadString(buff, "Ware", "");
+				wu.Units = iniReader.ReadInteger(buff, "Units", 0);
 
 				RefuelWares.push_back(wu);
 				i++;
