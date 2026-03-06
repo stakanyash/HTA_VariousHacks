@@ -20,6 +20,7 @@
 #include "ObjContUpgrade.h"
 #include "PostEffectReloadFix.h"
 #include "AutoBrakeFix.h"
+#include "SaveLimits.h"
 
 void Init()
 {
@@ -153,6 +154,11 @@ void Init()
 	if (iniReader.ReadInteger("DEVELOPER", "AutoBrakeFix", 0) == 1)
 	{
 		InitAutoBrakeFix();
+	}
+
+	if (iniReader.ReadInteger("GENERAL", "SaveLimits", 0) == 1)
+	{
+		InitSaveLimits();
 	}
 }
 
