@@ -161,6 +161,7 @@ copy "$(TargetDir)*.pdb" "$(SolutionDir)mod\scripts"  /y</Command>
     <ClInclude Include="PrototypeManager.h" />
     <ClInclude Include="Quaternion.h" />
     <ClInclude Include="RefCountedBase.h" />
+    <ClInclude Include="SaveLimits.h" />
     <ClInclude Include="ScriptServer.h" />
     <ClInclude Include="SgAnimatedModelNode.h" />
     <ClInclude Include="SgNode.h" />

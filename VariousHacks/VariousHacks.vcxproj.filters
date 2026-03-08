@@ -270,6 +270,9 @@
     <ClInclude Include="Path.h">
       <Filter>SDK\ai</Filter>
     </ClInclude>
+    <ClInclude Include="SaveLimits.h">
+      <Filter>Features</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\mod\scripts\VariousHacks.ini">
