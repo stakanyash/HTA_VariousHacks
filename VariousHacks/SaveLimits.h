@@ -205,7 +205,6 @@ static void PatchSaveInfoXml()
 
     bool hasCustom = false;
     char customName[256] = {};
-
     if (g_pendingPrefix[0] && levelFullName[0]) {
         if (strcmp(g_pendingPrefix, levelFullName) != 0) {
             hasCustom = true;
@@ -222,7 +221,7 @@ static void PatchSaveInfoXml()
 
     int maxIndex = GetMaxUnnamedAutoSaveIndex(profileName, g_pendingFolderName);
     int newIndex = hasCustom ? maxIndex : maxIndex + 1;
-    if (newIndex < 1) newIndex = 1;
+    if (newIndex < 1 && !hasCustom) newIndex = 1;
 
     char newName[512] = {};
     if (hasCustom) {
@@ -256,7 +255,6 @@ static void PatchSaveInfoXml()
     int part1Len = (int)(nameAttr - buf);
     memcpy(newBuf, buf, part1Len);
     newBuf[part1Len] = 0;
-
     strcat(newBuf, newName);
     strcat(newBuf, "\"");
 
@@ -267,7 +265,6 @@ static void PatchSaveInfoXml()
     char attribStr[128];
     sprintf(attribStr, "\n\tUnnamedAutoSaveIndex=\"%d\"\n\tIsAutoSave=\"True\">", newIndex);
     strcat(newBuf, attribStr);
-
     strcat(newBuf, "\n\t");
     strcat(newBuf, gameTime);
 
