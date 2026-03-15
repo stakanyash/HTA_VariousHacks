@@ -273,6 +273,9 @@
     <ClInclude Include="SaveLimits.h">
       <Filter>Features</Filter>
     </ClInclude>
+    <ClInclude Include="funcarg.h">
+      <Filter>SDK\m3d</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\mod\scripts\VariousHacks.ini">

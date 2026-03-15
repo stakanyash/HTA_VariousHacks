@@ -101,6 +101,7 @@ copy "$(TargetDir)*.pdb" "$(SolutionDir)mod\scripts"  /y</Command>
     <ClInclude Include="AnimInfo.h" />
     <ClInclude Include="Application.h" />
     <ClInclude Include="AutoBrakeFix.h" />
+    <ClInclude Include="funcarg.h" />
     <ClInclude Include="Path.h" />
     <ClInclude Include="Basket.h" />
     <ClInclude Include="BlastWave.h" />
