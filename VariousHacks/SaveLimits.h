@@ -427,6 +427,26 @@ static DWORD WINAPI PatchThread(LPVOID)
     return 0;
 }
 
+static void EnableAutosaveSuppression()
+{
+    injector::WriteMemory<uint8_t>(0x0057C554 + 0, 0x83, true);
+    injector::WriteMemory<uint8_t>(0x0057C554 + 1, 0xC4, true);
+    injector::WriteMemory<uint8_t>(0x0057C554 + 2, 0x08, true);
+    injector::WriteMemory<uint8_t>(0x0057C554 + 3, 0x90, true);
+    injector::WriteMemory<uint8_t>(0x0057C554 + 4, 0x90, true);
+    injector::WriteMemory<uint8_t>(0x0057C554 + 5, 0x90, true);
+}
+
+static void DisableAutosaveSuppression()
+{
+    injector::WriteMemory<uint8_t>(0x0057C554 + 0, 0xFF, true);
+    injector::WriteMemory<uint8_t>(0x0057C554 + 1, 0x92, true);
+    injector::WriteMemory<uint8_t>(0x0057C554 + 2, 0xB0, true);
+    injector::WriteMemory<uint8_t>(0x0057C554 + 3, 0x00, true);
+    injector::WriteMemory<uint8_t>(0x0057C554 + 4, 0x00, true);
+    injector::WriteMemory<uint8_t>(0x0057C554 + 5, 0x00, true);
+}
+
 // Extract save info from the stack before SaveGame executes
 // Captures the save folder name and the pending prefix (map/custom name)
 // so function can compute the corrected name before the game proceeds.
@@ -441,7 +461,15 @@ static void __cdecl PrepareFolderName(void* ediVal, void* ecxVal, void* ebpVal)
     if (!ediVal) return;
     char* folderPtr = *(char**)ediVal;
     if (!folderPtr) return;
-    if (strncmp(folderPtr, "auto_", 5) != 0) return; // only process autosaves
+    if (strncmp(folderPtr, "auto_", 5) == 0)
+    {
+        EnableAutosaveSuppression();
+    }
+    else
+    {
+        DisableAutosaveSuppression();
+        return;
+    }
 
     strncpy(g_pendingFolderName, folderPtr, sizeof(g_pendingFolderName) - 1);
 
@@ -540,14 +568,8 @@ void InitSaveLimits()
     injector::MakeCALL(0x0057C309, HookBeforeSaveGame, true);
     injector::MakeCALL(0x0057C366, HookAfterSave, true);
 
-    // Known issues (TODO):
-    // The game's own "Game Saved" FadingMsg is not suppressed. This code calls a separate
-    // FadingMsg instead of hooking the one the game calls, resulting in two messages.
+    // Known issues:
 
     // Autosave numbering breaks when switching profiles, because the code does not detect
     // profile changes at runtime. It's only my fault, lol.
-
-    // In fact, I think it would be much easier to create my own autosave logic that would 
-    // simply intercept the original one, but... 
-    // it doesn't matter, I've already wasted at least 10 days on this. So I'm gonna finish this one first.
 }
