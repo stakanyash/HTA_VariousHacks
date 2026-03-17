@@ -254,7 +254,11 @@ static void ComputeCorrectedName()
         else fclose(f);
     }
 
+    uint32_t autosave_limit = *(uint8_t*)0x0057BCBD;
+
     int newIndex = hasCustom ? maxIndex : maxIndex + 1;
+    if (!hasCustom && newIndex > (int)autosave_limit)
+        newIndex = 1;
     if (newIndex < 1 && !hasCustom) newIndex = 1;
 
     if (hasCustom)
@@ -345,8 +349,12 @@ static void PatchSaveInfoXml()
         }
     }
 
+    uint32_t autosave_limit = *(uint8_t*)0x0057BCBD;
+
     int maxIndex = GetMaxUnnamedAutoSaveIndex(profileName, g_pendingFolderName);
     int newIndex = hasCustom ? maxIndex : maxIndex + 1;
+    if (!hasCustom && newIndex > (int)autosave_limit)
+        newIndex = 1;
     if (newIndex < 1 && !hasCustom) newIndex = 1;
 
     // Build the final save name
