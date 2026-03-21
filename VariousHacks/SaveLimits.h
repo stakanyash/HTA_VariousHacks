@@ -9,22 +9,23 @@
 // Globals
 
 static char g_autoSaveLabel[128] = "Autosave";      // localized autosave label from gamestrings.xml
-static char g_pendingFolderName[64] = {};            // folder name of the save being processed (e.g. "auto_00000001")
-static char g_pendingPrefix[256] = {};               // map name or custom save name extracted from stack
-static char g_correctedName[512] = {};               // final corrected save name for FadingMsg
-static void* g_savesMgrThis = nullptr;               // SavesManager instance pointer for ReloadSaveInfos
-static bool g_isComRem = false;                      // true if running Community Remaster version
+static char g_pendingFolderName[64] = {};           // folder name of the save being processed (e.g. "auto_00000001")
+static char g_pendingPrefix[256] = {};              // map name or custom save name extracted from stack
+static char g_correctedName[512] = {};              // final corrected save name for FadingMsg
+static char g_pendingProfileName[256] = {};         // profile name that owns the save being processed, resolved once in PrepareFolderName
+static void* g_savesMgrThis = nullptr;              // SavesManager instance pointer for ReloadSaveInfos
+static bool g_isComRem = false;                     // true if running Community Remaster version
 
 // Game addresses
 
-static const uintptr_t OrigFunc = 0x0057C5A0; // SavesManager::SaveGame
-static const uintptr_t LoadInfosFunc = 0x0057D310; // SavesManager::LoadInfos
-static const uintptr_t AddrAddImpByStrIdFmt = 0x0040A8D0; // n_AddImportantFadingMsgByStrIdFormatted (Lua native, called via sArgStack)
-static const uintptr_t OrigAfterSave = 0x0057CC70; // sub_57CC70, called after successful save in SavesManager::SaveGame
+static const uintptr_t OrigFunc = 0x0057C5A0;               // SavesManager::AutoSave
+static const uintptr_t LoadInfosFunc = 0x0057D310;          // SavesManager::LoadInfos
+static const uintptr_t AddrAddImpByStrIdFmt = 0x0040A8D0;   // n_AddImportantFadingMsgByStrIdFormatted (Lua native, called via sArgStack)
+static const uintptr_t OrigAfterSave = 0x0057CC70;          // sub_57CC70, called after successful save in SavesManager::SaveGame
 
+// CallAddImportantFadingMsgFormatted:
 // Call AddImportantFadingMsgByStrIdFormatted via sArgStack
 // The native expects sArgStack* in ecx. Build the stack manually and call the native directly.
-
 static void CallAddImportantFadingMsgFormatted(const char* strId, const char* text)
 {
     m3d::sArgStack stack;
@@ -46,7 +47,7 @@ static void CallAddImportantFadingMsgFormatted(const char* strId, const char* te
     }
 }
 
-// Detect game version
+// DetectGameVersion:
 // Uses for levelinfo check because
 // Community Remaster uses a levelinfo_hd file
 // instead of levelinfo
@@ -63,9 +64,9 @@ static void DetectGameVersion()
         g_isComRem = true;
 }
 
+// LoadAutoSaveLabel:
 // Load localized autosave label from gamestrings.xml
 // Finds the "AutoSave" string entry and stores its value in g_autoSaveLabel.
-
 static void LoadAutoSaveLabel()
 {
     FILE* f = fopen("../data/if/strings/gamestrings.xml", "rb");
@@ -96,6 +97,7 @@ static void LoadAutoSaveLabel()
     delete[] buf;
 }
 
+// GetLevelFullName:
 // Get full display name of a level from levelinfo.xml
 // Looks up the technical level name (e.g. "r1m4") and returns its fullName attribute.
 
@@ -135,6 +137,7 @@ static void GetLevelFullName(const char* levelName, char* outName, int outSize)
     delete[] buf;
 }
 
+// ReadUnnamedAutoSaveIndex:
 // Read UnnamedAutoSaveIndex from a SaveInfo.xml
 // Returns -1 if the attribute is not present (save has no index yet).
 
@@ -160,6 +163,7 @@ static int ReadUnnamedAutoSaveIndex(const char* xmlPath)
     return result;
 }
 
+// GetMaxUnnamedAutoSaveIndex:
 // Get the highest UnnamedAutoSaveIndex across all auto_* saves for a profile
 // skipFolder is excluded from the search (the save currently being written).
 
@@ -187,8 +191,10 @@ static int GetMaxUnnamedAutoSaveIndex(const char* profileName, const char* skipF
     return maxIndex;
 }
 
-// Find which profile owns a given save folder
-// Searches all profiles for the folder and returns the profile name.
+// FindProfileByFolder:
+// Determines which profile owns a given save folder.
+// Scans all profiles for "saves/<folder>" and selects the profile
+// whose matching folder has the most recent last write time.
 
 static bool FindProfileByFolder(const char* folder, char* outProfile, int outProfileSz)
 {
@@ -196,23 +202,38 @@ static bool FindProfileByFolder(const char* folder, char* outProfile, int outPro
     WIN32_FIND_DATAA fd;
     HANDLE hp = FindFirstFileA("data/profiles/*", &fd);
     if (hp == INVALID_HANDLE_VALUE) return false;
+
+    FILETIME bestTime = {};
+    char bestProfile[256] = {};
+
     do {
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != '.') {
             char candidate[512];
             sprintf(candidate, "data/profiles/%s/saves/%s", fd.cFileName, folder);
-            DWORD attr = GetFileAttributesA(candidate);
-            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
-                strncpy(outProfile, fd.cFileName, outProfileSz - 1);
-                outProfile[outProfileSz - 1] = 0;
-                FindClose(hp);
-                return true;
+
+            WIN32_FIND_DATAA fdDir;
+            HANDLE hd = FindFirstFileA(candidate, &fdDir);
+            if (hd != INVALID_HANDLE_VALUE) {
+                FindClose(hd);
+                if (CompareFileTime(&fdDir.ftLastWriteTime, &bestTime) > 0) {
+                    bestTime = fdDir.ftLastWriteTime;
+                    strncpy(bestProfile, fd.cFileName, sizeof(bestProfile) - 1);
+                    bestProfile[sizeof(bestProfile) - 1] = 0;
+                }
             }
         }
     } while (FindNextFileA(hp, &fd));
     FindClose(hp);
+
+    if (bestProfile[0]) {
+        strncpy(outProfile, bestProfile, outProfileSz - 1);
+        outProfile[outProfileSz - 1] = 0;
+        return true;
+    }
     return false;
 }
 
+// ComputeCorrectedName:
 // Compute the corrected save name for FadingMsg
 // Called before the save is written, using g_pendingPrefix from the stack.
 // - If g_pendingPrefix matches a level fullName -> unnamed autosave -> "LevelName Autosave N"
@@ -223,14 +244,10 @@ static void ComputeCorrectedName()
     g_correctedName[0] = 0;
     if (g_pendingFolderName[0] == 0) return;
     if (g_pendingPrefix[0] == 0) return;
+    if (g_pendingProfileName[0] == 0) return;
 
-    char profileName[256] = {};
-    if (!FindProfileByFolder(g_pendingFolderName, profileName, sizeof(profileName)))
-        return;
+    int maxIndex = GetMaxUnnamedAutoSaveIndex(g_pendingProfileName, g_pendingFolderName);
 
-    int maxIndex = GetMaxUnnamedAutoSaveIndex(profileName, g_pendingFolderName);
-
-    // Check if pendingPrefix is a known level fullName (unnamed autosave)
     bool hasCustom = true;
     const char* xmlPath = g_isComRem
         ? "data/if/diz/levelinfo_hd.xml"
@@ -267,6 +284,7 @@ static void ComputeCorrectedName()
         sprintf(g_correctedName, "%s %s %d", g_pendingPrefix, g_autoSaveLabel, newIndex);
 }
 
+// PatchSaveInfoXml:
 // Patch SaveInfo.xml after the game writes it
 // Replaces the Name attribute with the corrected name and adds
 // UnnamedAutoSaveIndex and IsAutoSave attributes.
@@ -277,31 +295,11 @@ static void ComputeCorrectedName()
 static void PatchSaveInfoXml()
 {
     if (g_pendingFolderName[0] == 0) return;
+    if (g_pendingProfileName[0] == 0) return;
 
-    // Find which profile owns this save folder
-    WIN32_FIND_DATAA fd;
-    HANDLE hp = FindFirstFileA("data/profiles/*", &fd);
-    if (hp == INVALID_HANDLE_VALUE) return;
-
-    char profileName[256] = {};
-    char xmlPath[512] = {};
-    do {
-        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != '.') {
-            char candidate[512];
-            sprintf(candidate, "data/profiles/%s/saves/%s/SaveInfo.xml",
-                fd.cFileName, g_pendingFolderName);
-            FILE* f = fopen(candidate, "rb");
-            if (f) {
-                fclose(f);
-                strcpy(xmlPath, candidate);
-                strcpy(profileName, fd.cFileName);
-                break;
-            }
-        }
-    } while (FindNextFileA(hp, &fd));
-    FindClose(hp);
-
-    if (xmlPath[0] == 0) return;
+    char xmlPath[512];
+    sprintf(xmlPath, "data/profiles/%s/saves/%s/SaveInfo.xml",
+        g_pendingProfileName, g_pendingFolderName);
 
     FILE* f = fopen(xmlPath, "rb");
     if (!f) return;
@@ -351,7 +349,7 @@ static void PatchSaveInfoXml()
 
     uint32_t autosave_limit = *(uint8_t*)0x0057BCBD;
 
-    int maxIndex = GetMaxUnnamedAutoSaveIndex(profileName, g_pendingFolderName);
+    int maxIndex = GetMaxUnnamedAutoSaveIndex(g_pendingProfileName, g_pendingFolderName);
     int newIndex = hasCustom ? maxIndex : maxIndex + 1;
     if (!hasCustom && newIndex > (int)autosave_limit)
         newIndex = 1;
@@ -411,6 +409,7 @@ static void PatchSaveInfoXml()
     g_pendingFolderName[0] = 0;
 }
 
+// ReloadSaveInfos:
 // Reload save list in SavesManager
 // Forces the UI to refresh after patching XML.
 
@@ -424,9 +423,9 @@ static void ReloadSaveInfos()
     }
 }
 
+// PatchThread:
 // Background thread: patch XML and reload saves
 // Runs with a delay to ensure the game has finished writing SaveInfo.xml.
-
 static DWORD WINAPI PatchThread(LPVOID)
 {
     Sleep(200);
@@ -434,6 +433,10 @@ static DWORD WINAPI PatchThread(LPVOID)
     ReloadSaveInfos();
     return 0;
 }
+
+// EnableAutosaveSuppression:
+// Enables the suppression of game's own FadingMsg for avoiding two FadingMsg (game's and custom one) 
+// at once on AutoSave
 
 static void EnableAutosaveSuppression()
 {
@@ -445,6 +448,9 @@ static void EnableAutosaveSuppression()
     injector::WriteMemory<uint8_t>(0x0057C554 + 5, 0x90, true);
 }
 
+// DisableAutosaveSuppression:
+// Disables the suppression of game's own FadingMsg. Disables when save type is manual or quick
+
 static void DisableAutosaveSuppression()
 {
     injector::WriteMemory<uint8_t>(0x0057C554 + 0, 0xFF, true);
@@ -455,15 +461,18 @@ static void DisableAutosaveSuppression()
     injector::WriteMemory<uint8_t>(0x0057C554 + 5, 0x00, true);
 }
 
-// Extract save info from the stack before SaveGame executes
-// Captures the save folder name and the pending prefix (map/custom name)
-// so function can compute the corrected name before the game proceeds.
+// PrepareFolderName:
+// Prepares autosave renaming context before SaveGame executes.
+// Captures the target autosave folder name, resolves the corresponding profile,
+// and extracts the save prefix (map/custom name) from the provided data.
+// Then computes the corrected save name and schedules a patch operation.
 
 static void __cdecl PrepareFolderName(void* ediVal, void* ecxVal, void* ebpVal)
 {
     g_pendingFolderName[0] = 0;
     g_pendingPrefix[0] = 0;
     g_correctedName[0] = 0;
+    g_pendingProfileName[0] = 0;
     g_savesMgrThis = ecxVal;
 
     if (!ediVal) return;
@@ -481,7 +490,8 @@ static void __cdecl PrepareFolderName(void* ediVal, void* ecxVal, void* ebpVal)
 
     strncpy(g_pendingFolderName, folderPtr, sizeof(g_pendingFolderName) - 1);
 
-    // Read the full save name string from ebp (e.g. "LevelName Autosave 1" or "CustomName Autosave 1")
+    FindProfileByFolder(g_pendingFolderName, g_pendingProfileName, sizeof(g_pendingProfileName));
+
     void* ebpContent = nullptr;
     if (ebpVal && !IsBadReadPtr(ebpVal, 4))
         ebpContent = *(void**)ebpVal;
@@ -489,7 +499,6 @@ static void __cdecl PrepareFolderName(void* ediVal, void* ecxVal, void* ebpVal)
     if (ebpContent && !IsBadReadPtr(ebpContent, 1)) {
         char* fullStr = (char*)ebpContent;
         if (!IsBadReadPtr(fullStr, 1) && fullStr[0] != 0) {
-            // Extract the prefix before " Autosave" (map name or custom name)
             char autoWithSpace[130];
             sprintf(autoWithSpace, " %s", g_autoSaveLabel);
             const char* autoPos = strstr(fullStr, autoWithSpace);
@@ -503,25 +512,27 @@ static void __cdecl PrepareFolderName(void* ediVal, void* ecxVal, void* ebpVal)
         }
     }
 
-    // Compute the corrected name now (synchronously) so HookAfterSave can use it
     ComputeCorrectedName();
 
-    // Launch background thread to patch XML and reload saves after game writes them
     HANDLE hThread = CreateThread(nullptr, 0, PatchThread, nullptr, 0, nullptr);
     if (hThread) CloseHandle(hThread);
 }
 
+// HookBeforeSaveGame:
 // Hook at SavesManager::SaveGame call site
 // Intercepts the call to SaveGame, captures stack state, then jumps to original.
+// eax = ebpVal (from stack)
+// ecx = this (SavesManager*)
+// edi = pointer to save folder name
 
 __declspec(naked) static void HookBeforeSaveGame()
 {
     __asm {
         pushad
-        mov  eax, [esp + 2Ch]   // ebpVal
+        mov  eax, [esp + 2Ch]
         push eax
-        push ecx                // ecxVal (SavesManager* this)
-        push edi                // ediVal (save folder name ptr)
+        push ecx
+        push edi
         call PrepareFolderName
         add  esp, 12
         popad
@@ -529,6 +540,7 @@ __declspec(naked) static void HookBeforeSaveGame()
     }
 }
 
+// AfterSaveHookImpl:
 // Show corrected FadingMsg after save completes
 // Called from HookAfterSave in the main thread, after SaveGame succeeds.
 
@@ -541,6 +553,7 @@ static void AfterSaveHookImpl()
     }
 }
 
+// HookAfterSave:
 // Hook at sub_57CC70 call site (post-save success path)
 // Fires in the main thread after a successful save, allowing safe FadingMsg call.
 
@@ -554,6 +567,9 @@ __declspec(naked) static void HookAfterSave()
         jmp  OrigAfterSave
     }
 }
+
+// InitSaveLimits:
+// Init all patches to save limits, HookBeforeSaveGame and HookAfterSave
 
 void InitSaveLimits()
 {
@@ -576,8 +592,7 @@ void InitSaveLimits()
     injector::MakeCALL(0x0057C309, HookBeforeSaveGame, true);
     injector::MakeCALL(0x0057C366, HookAfterSave, true);
 
-    // Known issues:
-
-    // Autosave numbering breaks when switching profiles, because the code does not detect
-    // profile changes at runtime. It's only my fault, lol.
+    // known issues:
+    // xml patching and numeration in fadingmsg can be broken
+    // after map changing. idk how is possible.
 }
