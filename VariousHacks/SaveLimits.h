@@ -6,15 +6,24 @@
 #include <windows.h>
 #include "funcarg.h"
 
+struct PendingSaveData {
+    char folderName[64];
+    char prefix[256];
+    char profileName[256];
+    int index;
+    bool hasCustom;
+    char levelFullName[256];
+    void* savesMgrThis;
+};
+
 // Globals
 
 static char g_autoSaveLabel[128] = "Autosave";      // localized autosave label from gamestrings.xml
-static char g_pendingFolderName[64] = {};           // folder name of the save being processed (e.g. "auto_00000001")
-static char g_pendingPrefix[256] = {};              // map name or custom save name extracted from stack
 static char g_correctedName[512] = {};              // final corrected save name for FadingMsg
-static char g_pendingProfileName[256] = {};         // profile name that owns the save being processed, resolved once in PrepareFolderName
 static void* g_savesMgrThis = nullptr;              // SavesManager instance pointer for ReloadSaveInfos
 static bool g_isComRem = false;                     // true if running Community Remaster version
+static PendingSaveData g_pendingSaveData = {};      // pending save data for patching after save
+static bool g_hasPendingSave = false;               // flag indicating pending save exists
 
 // Game addresses
 
@@ -163,13 +172,16 @@ static int ReadUnnamedAutoSaveIndex(const char* xmlPath)
     return result;
 }
 
-// GetMaxUnnamedAutoSaveIndex:
-// Get the highest UnnamedAutoSaveIndex across all auto_* saves for a profile
+// GetLastUsedAutoSaveIndex:
+// Get the UnnamedAutoSaveIndex from the most recently modified auto_* save for a profile.
 // skipFolder is excluded from the search (the save currently being written).
+// Uses SaveInfo.xml file modification time, not directory time.
+// Returns 0 if no saves found.
 
-static int GetMaxUnnamedAutoSaveIndex(const char* profileName, const char* skipFolder)
+static int GetLastUsedAutoSaveIndex(const char* profileName, const char* skipFolder)
 {
-    int maxIndex = 0;
+    int lastIndex = 0;
+    FILETIME bestTime = {};
     char pattern[512];
     sprintf(pattern, "data/profiles/%s/saves/auto_*", profileName);
     WIN32_FIND_DATAA fd;
@@ -183,12 +195,26 @@ static int GetMaxUnnamedAutoSaveIndex(const char* profileName, const char* skipF
             char xmlPath[512];
             sprintf(xmlPath, "data/profiles/%s/saves/%s/SaveInfo.xml",
                 profileName, fd.cFileName);
-            int c = ReadUnnamedAutoSaveIndex(xmlPath);
-            if (c > maxIndex) maxIndex = c;
+
+            // Get SaveInfo.xml modification time
+            WIN32_FIND_DATAA xmlFd;
+            HANDLE hXml = FindFirstFileA(xmlPath, &xmlFd);
+            if (hXml != INVALID_HANDLE_VALUE) {
+                FindClose(hXml);
+
+                // Use file time of SaveInfo.xml
+                if (CompareFileTime(&xmlFd.ftLastWriteTime, &bestTime) > 0) {
+                    int c = ReadUnnamedAutoSaveIndex(xmlPath);
+                    if (c > 0) {
+                        bestTime = xmlFd.ftLastWriteTime;
+                        lastIndex = c;
+                    }
+                }
+            }
         }
     } while (FindNextFileA(hp, &fd));
     FindClose(hp);
-    return maxIndex;
+    return lastIndex;
 }
 
 // FindProfileByFolder:
@@ -235,23 +261,27 @@ static bool FindProfileByFolder(const char* folder, char* outProfile, int outPro
 
 // ComputeCorrectedName:
 // Compute the corrected save name for FadingMsg
-// Called before the save is written, using g_pendingPrefix from the stack.
-// - If g_pendingPrefix matches a level fullName -> unnamed autosave -> "LevelName Autosave N"
-// - Otherwise -> custom named save -> use g_pendingPrefix as-is
+// Called before the save is written, using pendingPrefix from the stack.
+// - If pendingPrefix matches a level fullName -> unnamed autosave -> "LevelName Autosave N"
+// - Otherwise -> custom named save -> use pendingPrefix as-is
+// Fills outData with all computed values for later use in PatchSaveInfoXml.
 
-static void ComputeCorrectedName()
+static void ComputeCorrectedName(const char* folderName, const char* prefix, const char* profileName, PendingSaveData& outData)
 {
+    outData.index = 0;
+    outData.hasCustom = false;
+    outData.levelFullName[0] = 0;
+
     g_correctedName[0] = 0;
-    if (g_pendingFolderName[0] == 0) return;
-    if (g_pendingPrefix[0] == 0) return;
-    if (g_pendingProfileName[0] == 0) return;
+    if (folderName[0] == 0) return;
+    if (prefix[0] == 0) return;
+    if (profileName[0] == 0) return;
 
-    int maxIndex = GetMaxUnnamedAutoSaveIndex(g_pendingProfileName, g_pendingFolderName);
-
-    bool hasCustom = true;
+    // Determine if prefix matches a level fullName
     const char* xmlPath = g_isComRem
         ? "data/if/diz/levelinfo_hd.xml"
         : "data/if/diz/levelinfo.xml";
+
     FILE* f = fopen(xmlPath, "rb");
     if (f) {
         fseek(f, 0, SEEK_END);
@@ -262,26 +292,101 @@ static void ComputeCorrectedName()
             fread(buf, 1, (size_t)sz, f);
             buf[sz] = 0;
             fclose(f);
-            char needle[270];
-            sprintf(needle, "fullName=\"%s\"", g_pendingPrefix);
-            if (strstr(buf, needle))
-                hasCustom = false;
+
+            // Search for level fullName match
+            bool foundLevel = false;
+            const char* searchPos = buf;
+
+            // Extract clean prefix (without autosave label)
+            char cleanPrefix[256];
+            const char* autoPos = strstr(prefix, g_autoSaveLabel);
+            if (autoPos) {
+                int cleanLen = (int)(autoPos - prefix);
+                if (cleanLen > 0 && cleanLen < (int)sizeof(cleanPrefix)) {
+                    memcpy(cleanPrefix, prefix, cleanLen);
+                    while (cleanLen > 0 && cleanPrefix[cleanLen - 1] == ' ') cleanLen--;
+                    cleanPrefix[cleanLen] = 0;
+                }
+                else {
+                    strcpy(cleanPrefix, prefix);
+                }
+            }
+            else {
+                strcpy(cleanPrefix, prefix);
+            }
+
+            while (!foundLevel) {
+                const char* fnAttr = strstr(searchPos, "fullName=\"");
+                if (!fnAttr) break;
+                fnAttr += 10;
+                const char* fnEnd = strchr(fnAttr, '"');
+                if (!fnEnd) break;
+
+                int fnLen = (int)(fnEnd - fnAttr);
+                if (fnLen > 0 && fnLen < 256) {
+                    char fullLevelName[256];
+                    memcpy(fullLevelName, fnAttr, fnLen);
+                    fullLevelName[fnLen] = 0;
+
+                    // Check if clean prefix matches fullName
+                    if (strcmp(fullLevelName, cleanPrefix) == 0) {
+                        foundLevel = true;
+                        strncpy(outData.levelFullName, fullLevelName, sizeof(outData.levelFullName) - 1);
+                        outData.levelFullName[sizeof(outData.levelFullName) - 1] = 0;
+                    }
+                }
+                searchPos = fnEnd + 1;
+            }
+
+            outData.hasCustom = !foundLevel;
             delete[] buf;
         }
         else fclose(f);
     }
+    else {
+        // Can't read XML - assume custom
+        outData.hasCustom = true;
+    }
+
+    int lastIndex = GetLastUsedAutoSaveIndex(profileName, folderName);
 
     uint32_t autosave_limit = *(uint8_t*)0x0057BCBD;
 
-    int newIndex = hasCustom ? maxIndex : maxIndex + 1;
-    if (!hasCustom && newIndex > (int)autosave_limit)
-        newIndex = 1;
-    if (newIndex < 1 && !hasCustom) newIndex = 1;
+    int newIndex = 0;
+    if (outData.hasCustom) {
+        newIndex = 0; // Custom saves don't need index
+    }
+    else {
+        newIndex = lastIndex + 1;
+        if (newIndex > (int)autosave_limit)
+            newIndex = 1;
+        if (newIndex < 1) newIndex = 1;
+    }
 
-    if (hasCustom)
-        sprintf(g_correctedName, "%s", g_pendingPrefix);
-    else
-        sprintf(g_correctedName, "%s %s %d", g_pendingPrefix, g_autoSaveLabel, newIndex);
+    outData.index = newIndex;
+
+    if (outData.hasCustom) {
+        // Custom save: remove autosave label from prefix if present
+        const char* autoPos = strstr(prefix, g_autoSaveLabel);
+        if (autoPos) {
+            int cleanLen = (int)(autoPos - prefix);
+            char cleanPrefix[256];
+            memcpy(cleanPrefix, prefix, cleanLen);
+            // Trim trailing space
+            while (cleanLen > 0 && cleanPrefix[cleanLen - 1] == ' ') cleanLen--;
+            cleanPrefix[cleanLen] = 0;
+            sprintf(g_correctedName, "%s", cleanPrefix);
+        }
+        else {
+            sprintf(g_correctedName, "%s", prefix);
+        }
+    }
+    else if (outData.levelFullName[0]) {
+        sprintf(g_correctedName, "%s %s %d", outData.levelFullName, g_autoSaveLabel, newIndex);
+    }
+    else {
+        sprintf(g_correctedName, "%s %d", prefix, newIndex);
+    }
 }
 
 // PatchSaveInfoXml:
@@ -292,14 +397,14 @@ static void ComputeCorrectedName()
 // UnnamedAutoSaveIndex used for numbering autosaves without a custom name.
 // IsAutoSave just a flag that this is a AutoSave. Anyway this is a request from E Jet.
 
-static void PatchSaveInfoXml()
+static void PatchSaveInfoXml(const PendingSaveData& data)
 {
-    if (g_pendingFolderName[0] == 0) return;
-    if (g_pendingProfileName[0] == 0) return;
+    if (data.folderName[0] == 0) return;
+    if (data.profileName[0] == 0) return;
 
     char xmlPath[512];
     sprintf(xmlPath, "data/profiles/%s/saves/%s/SaveInfo.xml",
-        g_pendingProfileName, g_pendingFolderName);
+        data.profileName, data.folderName);
 
     FILE* f = fopen(xmlPath, "rb");
     if (!f) return;
@@ -308,61 +413,36 @@ static void PatchSaveInfoXml()
     if (sz <= 0) { fclose(f); return; }
     fseek(f, 0, SEEK_SET);
     char* buf = new char[sz + 1];
-    fread(buf, 1, (size_t)sz, f);
+    size_t bytesRead = fread(buf, 1, (size_t)sz, f);
     buf[sz] = 0;
     fclose(f);
 
-    // Read LevelName to look up the full display name
-    char levelName[64] = {};
-    char* lvlAttr = strstr(buf, "LevelName=\"");
-    if (lvlAttr) {
-        lvlAttr += 11;
-        char* lvlEnd = strchr(lvlAttr, '"');
-        if (lvlEnd) {
-            int len = (int)(lvlEnd - lvlAttr);
-            if (len > 0 && len < (int)sizeof(levelName)) {
-                memcpy(levelName, lvlAttr, len);
-                levelName[len] = 0;
-            }
-        }
-    }
+    if (bytesRead < (size_t)sz) { delete[] buf; return; }
 
-    char levelFullName[256] = {};
-    if (levelName[0])
-        GetLevelFullName(levelName, levelFullName, sizeof(levelFullName));
-
-    // Determine if this is a custom-named save or an unnamed autosave
-    bool hasCustom = false;
-    char customName[256] = {};
-    if (g_pendingPrefix[0] && levelFullName[0]) {
-        if (strcmp(g_pendingPrefix, levelFullName) != 0) {
-            hasCustom = true;
-            int mapLen = (int)strlen(levelFullName);
-            // Strip the level name prefix if present (e.g. "LevelName CustomName" -> "CustomName")
-            if (strncmp(g_pendingPrefix, levelFullName, mapLen) == 0
-                && g_pendingPrefix[mapLen] == ' ')
-                strncpy(customName, g_pendingPrefix + mapLen + 1, sizeof(customName) - 1);
-            else
-                strncpy(customName, g_pendingPrefix, sizeof(customName) - 1);
-        }
-    }
-
-    uint32_t autosave_limit = *(uint8_t*)0x0057BCBD;
-
-    int maxIndex = GetMaxUnnamedAutoSaveIndex(g_pendingProfileName, g_pendingFolderName);
-    int newIndex = hasCustom ? maxIndex : maxIndex + 1;
-    if (!hasCustom && newIndex > (int)autosave_limit)
-        newIndex = 1;
-    if (newIndex < 1 && !hasCustom) newIndex = 1;
-
-    // Build the final save name
+    // Build the final save name using pre-computed values
     char newName[512] = {};
-    if (hasCustom)
-        sprintf(newName, "%s", customName);
-    else if (levelFullName[0])
-        sprintf(newName, "%s %s %d", levelFullName, g_autoSaveLabel, newIndex);
-    else
-        sprintf(newName, "%s %d", g_autoSaveLabel, newIndex);
+    if (data.hasCustom) {
+        // Custom-named save: remove autosave label from prefix if present
+        const char* autoPos = strstr(data.prefix, g_autoSaveLabel);
+        if (autoPos) {
+            int cleanLen = (int)(autoPos - data.prefix);
+            char cleanPrefix[256];
+            memcpy(cleanPrefix, data.prefix, cleanLen);
+            while (cleanLen > 0 && cleanPrefix[cleanLen - 1] == ' ') cleanLen--;
+            cleanPrefix[cleanLen] = 0;
+            sprintf(newName, "%s", cleanPrefix);
+        }
+        else {
+            sprintf(newName, "%s", data.prefix);
+        }
+    }
+    else if (data.levelFullName[0]) {
+        sprintf(newName, "%s %s %d", data.levelFullName, g_autoSaveLabel, data.index);
+    }
+    else {
+        // No level full name - prefix already contains "LevelName AutoSave"
+        sprintf(newName, "%s %d", data.prefix, data.index);
+    }
 
     // Rebuild XML with patched Name and new attributes
     char* nameAttr = strstr(buf, "Name=\"");
@@ -372,31 +452,50 @@ static void PatchSaveInfoXml()
     if (!nameEnd) { delete[] buf; return; }
 
     char* lvlAttr2 = strstr(buf, "LevelName=\"");
-    if (!lvlAttr2) { delete[] buf; return; }
-    lvlAttr2 += 11;
-    char* lvlEnd2 = strchr(lvlAttr2, '"');
-    if (!lvlEnd2) { delete[] buf; return; }
+    char* lvlEnd2 = nullptr;
+    if (lvlAttr2) {
+        lvlAttr2 += 11;
+        lvlEnd2 = strchr(lvlAttr2, '"');
+    }
 
+    char* tagClose = strchr(nameEnd, '>');
+    if (!tagClose) { delete[] buf; return; }
+
+    // Find <GameTime
     char* gameTime = strstr(buf, "<GameTime");
     if (!gameTime) { delete[] buf; return; }
 
-    char newBuf[4096];
-    newBuf[0] = 0;
+    // Extract LevelName value if present
+    char levelNameVal[256] = {};
+    if (lvlAttr2 && lvlEnd2) {
+        int lvlLen = (int)(lvlEnd2 - lvlAttr2);
+        if (lvlLen > 0 && lvlLen < (int)sizeof(levelNameVal)) {
+            memcpy(levelNameVal, lvlAttr2, lvlLen);
+            levelNameVal[lvlLen] = 0;
+        }
+    }
 
-    int part1Len = (int)(nameAttr - buf);
-    memcpy(newBuf, buf, part1Len);
-    newBuf[part1Len] = 0;
-    strcat(newBuf, newName);
-    strcat(newBuf, "\"");
+    // Rebuild the SaveInfo opening tag
+    char newBuf[1024];
+    int pos = 0;
+    pos += sprintf(newBuf + pos, "<SaveInfo\n\tName=\"%s\"", newName);
+    if (levelNameVal[0]) {
+        pos += sprintf(newBuf + pos, "\n\tLevelName=\"%s\"", levelNameVal);
+    }
+    if (!data.hasCustom) {
+        pos += sprintf(newBuf + pos, "\n\tUnnamedAutoSaveIndex=\"%d\"\n\tIsAutoSave=\"True\">", data.index);
+    }
+    else {
+        pos += sprintf(newBuf + pos, ">");
+    }
+    pos += sprintf(newBuf + pos, "\n\t");
 
-    int part2Start = (int)(nameEnd + 1 - buf);
-    int part2Len = (int)(lvlEnd2 + 1 - buf) - part2Start;
-    strncat(newBuf, buf + part2Start, part2Len);
+    // Find end of opening tag
+    char* tagEnd = strchr(tagClose, '\n');
+    if (!tagEnd) tagEnd = tagClose + 1;
+    else tagEnd++;
 
-    char attribStr[128];
-    sprintf(attribStr, "\n\tUnnamedAutoSaveIndex=\"%d\"\n\tIsAutoSave=\"True\">", newIndex);
-    strcat(newBuf, attribStr);
-    strcat(newBuf, "\n\t");
+    // Append rest of file from gameTime
     strcat(newBuf, gameTime);
 
     FILE* fw = fopen(xmlPath, "wb");
@@ -406,13 +505,12 @@ static void PatchSaveInfoXml()
     }
 
     delete[] buf;
-    g_pendingFolderName[0] = 0;
 }
 
 // ReloadSaveInfos:
 // Reload save list in SavesManager
 // Forces the UI to refresh after patching XML.
-
+// (Now called from PatchThread using data->savesMgrThis)
 static void ReloadSaveInfos()
 {
     if (!g_savesMgrThis) return;
@@ -421,17 +519,6 @@ static void ReloadSaveInfos()
         mov  ecx, mgr
         call LoadInfosFunc
     }
-}
-
-// PatchThread:
-// Background thread: patch XML and reload saves
-// Runs with a delay to ensure the game has finished writing SaveInfo.xml.
-static DWORD WINAPI PatchThread(LPVOID)
-{
-    Sleep(200);
-    PatchSaveInfoXml();
-    ReloadSaveInfos();
-    return 0;
 }
 
 // EnableAutosaveSuppression:
@@ -469,10 +556,7 @@ static void DisableAutosaveSuppression()
 
 static void __cdecl PrepareFolderName(void* ediVal, void* ecxVal, void* ebpVal)
 {
-    g_pendingFolderName[0] = 0;
-    g_pendingPrefix[0] = 0;
     g_correctedName[0] = 0;
-    g_pendingProfileName[0] = 0;
     g_savesMgrThis = ecxVal;
 
     if (!ediVal) return;
@@ -488,9 +572,15 @@ static void __cdecl PrepareFolderName(void* ediVal, void* ecxVal, void* ebpVal)
         return;
     }
 
-    strncpy(g_pendingFolderName, folderPtr, sizeof(g_pendingFolderName) - 1);
+    // Allocate data on heap so it won't be overwritten by subsequent calls
+    PendingSaveData* data = new PendingSaveData();
+    memset(data, 0, sizeof(PendingSaveData));
 
-    FindProfileByFolder(g_pendingFolderName, g_pendingProfileName, sizeof(g_pendingProfileName));
+    strncpy(data->folderName, folderPtr, sizeof(data->folderName) - 1);
+    data->folderName[sizeof(data->folderName) - 1] = 0;
+
+    // Resolve profile
+    FindProfileByFolder(data->folderName, data->profileName, sizeof(data->profileName));
 
     void* ebpContent = nullptr;
     if (ebpVal && !IsBadReadPtr(ebpVal, 4))
@@ -499,23 +589,54 @@ static void __cdecl PrepareFolderName(void* ediVal, void* ecxVal, void* ebpVal)
     if (ebpContent && !IsBadReadPtr(ebpContent, 1)) {
         char* fullStr = (char*)ebpContent;
         if (!IsBadReadPtr(fullStr, 1) && fullStr[0] != 0) {
-            char autoWithSpace[130];
-            sprintf(autoWithSpace, " %s", g_autoSaveLabel);
-            const char* autoPos = strstr(fullStr, autoWithSpace);
-            if (autoPos) {
-                int prefLen = (int)(autoPos - fullStr);
-                if (prefLen > 0 && prefLen < (int)sizeof(g_pendingPrefix)) {
-                    memcpy(g_pendingPrefix, fullStr, prefLen);
-                    g_pendingPrefix[prefLen] = 0;
+            // Find the last occurrence of " <digits>" at the end of string
+            int len = (int)strlen(fullStr);
+            int lastSpacePos = -1;
+
+            // Scan backwards to find the last space followed by a number
+            for (int i = len - 1; i >= 0; i--) {
+                if (fullStr[i] == ' ') {
+                    // Check if everything after space is a number
+                    bool allDigits = true;
+                    for (int j = i + 1; j < len; j++) {
+                        if (fullStr[j] < '0' || fullStr[j] > '9') {
+                            allDigits = false;
+                            break;
+                        }
+                    }
+                    if (allDigits && i + 1 < len) {
+                        lastSpacePos = i;
+                        break;
+                    }
                 }
+            }
+
+            if (lastSpacePos > 0) {
+                // Extract prefix (everything before " <number>")
+                int prefLen = lastSpacePos;
+                if (prefLen > 0 && prefLen < (int)sizeof(data->prefix)) {
+                    memcpy(data->prefix, fullStr, prefLen);
+                    data->prefix[prefLen] = 0;
+                }
+            }
+            else {
+                // No trailing number - use entire string as prefix (custom save)
+                int copyLen = min(len, (int)sizeof(data->prefix) - 1);
+                memcpy(data->prefix, fullStr, copyLen);
+                data->prefix[copyLen] = 0;
             }
         }
     }
 
-    ComputeCorrectedName();
+    data->savesMgrThis = ecxVal;
 
-    HANDLE hThread = CreateThread(nullptr, 0, PatchThread, nullptr, 0, nullptr);
-    if (hThread) CloseHandle(hThread);
+    ComputeCorrectedName(data->folderName, data->prefix, data->profileName, *data);
+
+    // Store in global for patching after save
+    memcpy(&g_pendingSaveData, data, sizeof(PendingSaveData));
+    g_hasPendingSave = true;
+
+    delete data;
 }
 
 // HookBeforeSaveGame:
@@ -546,6 +667,20 @@ __declspec(naked) static void HookBeforeSaveGame()
 
 static void AfterSaveHookImpl()
 {
+    // Patch XML immediately
+    if (g_hasPendingSave && g_pendingSaveData.folderName[0] != 0) {
+        PendingSaveData copy = g_pendingSaveData;
+        g_hasPendingSave = false;
+        PatchSaveInfoXml(copy);
+        if (copy.savesMgrThis) {
+            void* mgr = copy.savesMgrThis;
+            __asm {
+                mov  ecx, mgr
+                call LoadInfosFunc
+            }
+        }
+    }
+
     if (g_correctedName[0] != '\0')
     {
         CallAddImportantFadingMsgFormatted("GameWasSaved", g_correctedName);
@@ -591,8 +726,4 @@ void InitSaveLimits()
 
     injector::MakeCALL(0x0057C309, HookBeforeSaveGame, true);
     injector::MakeCALL(0x0057C366, HookAfterSave, true);
-
-    // known issues:
-    // xml patching and numeration in fadingmsg can be broken
-    // after map changing. idk how is possible.
 }
